@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Figma HQ Prototype Recorder",
+  "version": "0.1.0",
+  "description": "Record the Figma inline Preview to video at native resolution — device frame included.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.figma.com/design/*", "https://www.figma.com/file/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
