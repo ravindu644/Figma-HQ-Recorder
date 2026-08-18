@@ -15,9 +15,22 @@ No build step, no dependencies.
 ## Use
 
 1. Open a Figma design and press **Shift+Space** for the inline Preview
-2. Click **Record HQ** (bottom right)
-3. Click through your prototype
-4. Click **Stop** — the video downloads automatically
+2. Set frame rate, quality, and codec in the panel (bottom right)
+3. Click **Record HQ**
+4. Click through your prototype
+5. Click **Stop** — the video downloads automatically
+
+The panel hides while recording, since the encode is already running. Choices persist in `localStorage`.
+
+| control | range | default |
+|---|---|---|
+| Frame rate | 15-60 fps | 30 |
+| Quality | 4-40 Mbps | 12 |
+| Codec | whichever of MP4/H.264, WebM/VP9, WebM/AV1, WebM/VP8 the browser supports | MP4/H.264 |
+
+MP4/H.264 leads for a reason: it's the most portable, and VP8 can silently capture an empty clip off a WebGL canvas. Codecs the browser can't encode are dropped from the list rather than offered and then failing at record time.
+
+The panel shows an estimated MB/min and turns amber past 50fps/28Mbps — 60fps at 40Mbps on a 3.5-megapixel canvas crashed the renderer outright on a two-minute take.
 
 The preview briefly resizes itself to native resolution and scales back down visually. It stays the same size on screen and stays clickable while recording.
 
@@ -73,7 +86,7 @@ Output is the bezel PNG's native size — around 1310×2710, varying by device. 
 - Chromium only (Chrome, Brave, Edge, Vivaldi). Firefox needs manifest changes.
 - No audio yet.
 - MP4 comes out of `MediaRecorder` fragmented. Chrome reads the duration correctly, but some other players may scrub poorly; a remux pass would fix that.
-- Recording is capped at 30fps / 12 Mbps by default. Those aren't arbitrary — 60fps at 40 Mbps on a 3.5-megapixel canvas crashed the renderer outright on a two-minute take.
+- Defaults are 30fps / 12 Mbps. Not arbitrary — see above. The sliders go higher and warn you when they get there.
 - Requires a device frame to be set in Figma's Prototype tab. Without one there's no bezel to composite.
 - The Dynamic Island is drawn over your content, because it's part of the frame asset. Figma's own preview hides it behind the screen; a real phone doesn't.
 - Dragging the preview window while it's scaled can feel offset — Figma's drag math doesn't know about the transform.

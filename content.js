@@ -43,16 +43,26 @@
   if (window.__figHQRecorder) return;
   window.__figHQRecorder = true;
 
-  const FPS = 30;
-  // ponytail: 30fps @ 12Mbps on a ~3.5MP canvas. Measured ceiling, not a guess —
-  // 60fps @ 40Mbps crashed the renderer (SIGILL) on a two-minute take. Raise both
-  // only if you also shorten the recording.
-  const BITRATE = 12_000_000;
-  const MIME = [
-    "video/mp4;codecs=avc1",    // first choice: universal, and reliable off a WebGL canvas
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-  ];
+  /* MP4/H.264 leads deliberately: it is the most portable, and VP8 can silently
+     capture an empty clip off a WebGL canvas. Anything the browser can't encode is
+     dropped from the list rather than offered and then failing at record time. */
+  const CODECS = [
+    { mime: "video/mp4;codecs=avc1", label: "MP4 · H.264" },
+    { mime: "video/webm;codecs=vp9", label: "WebM · VP9" },
+    { mime: "video/webm;codecs=av01", label: "WebM · AV1" },
+    { mime: "video/webm;codecs=vp8", label: "WebM · VP8" },
+  ].filter((c) => window.MediaRecorder && MediaRecorder.isTypeSupported(c.mime));
+
+  /* Defaults are a measured ceiling, not a guess: 60fps @ 40Mbps on a ~3.5MP canvas
+     crashed the renderer outright (SIGILL) on a two-minute take. The sliders can go
+     higher — the panel warns when the combination gets there. localStorage rather
+     than chrome.storage keeps this a zero-permission, zero-chrome.* content script. */
+  const STORE = "figHQRecorder.settings";
+  const DEFAULTS = { fps: 30, mbps: 12, mime: CODECS[0] && CODECS[0].mime };
+  const cfg = { ...DEFAULTS };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE) || "{}")); } catch (e) {}
+  if (!CODECS.some((c) => c.mime === cfg.mime)) cfg.mime = DEFAULTS.mime;   // codec dropped by a browser update
+  const saveCfg = () => { try { localStorage.setItem(STORE, JSON.stringify(cfg)); } catch (e) {} };
 
   const SEL = {
     modal: '[class*="inline_preview_modal--previewModal"]',
@@ -165,7 +175,12 @@
     let p = parts();
     if (!p) return note("Open the Preview first (Shift+Space)");
     if (!p.bezel) return note("No device frame — pick one in Figma's Prototype tab");
+    if (!CODECS.length) return note("This browser can't record video");
     if (document.hidden) return note("Bring the tab to the foreground — Figma throttles background rendering");
+
+    const fps = cfg.fps;              // snapshot: the panel is hidden while recording,
+    const mime = cfg.mime;            // but never let a live edit tear a running encode
+    const bitrate = cfg.mbps * 1e6;
 
     const undoSize = goNative(p);
     await sleep(1200);              // let Figma reallocate and repaint the canvas
@@ -174,7 +189,7 @@
     if (!p) { undoSize(); return note("Lost the Preview while resizing"); }
 
     // The WebGL canvas has no readable buffer (finding 3) — go through a stream.
-    const srcStream = p.canvas.captureStream(FPS);
+    const srcStream = p.canvas.captureStream(fps);
     const video = document.createElement("video");
     video.srcObject = srcStream;
     video.muted = true;
@@ -205,7 +220,7 @@
     const radii = [{ x: g.radius.x * sw, y: g.radius.y * sh }];
 
     let raf = 0, last = -1e9;
-    const minGap = 1000 / FPS;
+    const minGap = 1000 / fps;
     const draw = (t) => {
       raf = requestAnimationFrame(draw);
       if (t - last < minGap) return;   // compositing 3.5MP at display rate is what melted it
@@ -221,8 +236,7 @@
     };
     draw(0);
 
-    const mime = MIME.find((m) => MediaRecorder.isTypeSupported(m));
-    const rec = new MediaRecorder(out.captureStream(FPS), { mimeType: mime, videoBitsPerSecond: BITRATE });
+    const rec = new MediaRecorder(out.captureStream(fps), { mimeType: mime, videoBitsPerSecond: bitrate });
     const chunks = [];
     rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.start(1000);
@@ -293,7 +307,76 @@
   pill.append(dot, label);
 
   const toast = document.createElement("div");
-  toast.style.cssText = CHIP + ";bottom:80px;display:none";
+  toast.style.cssText = CHIP + ";top:24px;display:none";
+
+  /* Settings panel, above the pill. It simply hides while recording, which doubles as
+     the "locked during a take" affordance without any disabled-state code. Native
+     <input type=range> and <select> — no custom widgets to style or keyboard-proof. */
+  const panel = document.createElement("div");
+  panel.style.cssText = CHIP +
+    ";bottom:76px;display:none;flex-direction:column;align-items:stretch;gap:10px" +
+    ";padding:14px 16px;width:268px;cursor:default;border-radius:14px";   // CHIP's 999px is a pill, wrong for a panel
+
+  const mkRow = (name) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:10px";
+    const l = document.createElement("span");
+    l.textContent = name;
+    l.style.cssText = "opacity:.65;width:78px;flex:none;white-space:nowrap";
+    row.append(l);
+    panel.append(row);
+    return row;
+  };
+
+  const mkSlider = (name, key, min, max, step, fmt) => {
+    const row = mkRow(name);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = min; input.max = max; input.step = step; input.value = cfg[key];
+    input.style.cssText = "flex:1;min-width:0;accent-color:#ff4d4d";
+    const valEl = document.createElement("span");
+    valEl.style.cssText = "width:64px;flex:none;text-align:right;font-variant-numeric:tabular-nums";
+    const sync = () => { valEl.textContent = fmt(cfg[key]); };
+    input.oninput = () => { cfg[key] = +input.value; sync(); info(); saveCfg(); };
+    sync();
+    row.append(input, valEl);
+  };
+
+  mkSlider("Frame rate", "fps", 15, 60, 5, (v) => v + " fps");
+  mkSlider("Quality", "mbps", 4, 40, 2, (v) => v + " Mbps");
+
+  const codecSel = document.createElement("select");
+  codecSel.style.cssText =
+    "flex:1;min-width:0;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:6px;padding:5px 6px;font:inherit";
+  for (const c of CODECS) {
+    const o = document.createElement("option");
+    o.value = c.mime;
+    o.textContent = c.label;
+    codecSel.append(o);
+  }
+  codecSel.value = cfg.mime;
+  codecSel.onchange = () => { cfg.mime = codecSel.value; saveCfg(); };
+  mkRow("Codec").append(codecSel);
+
+  const hint = document.createElement("div");
+  hint.style.cssText = "font-size:11px;line-height:1.4";
+  function info() {
+    if (!CODECS.length) {
+      hint.textContent = "This browser can't record video.";
+      hint.style.color = "#ffb454";
+      return;
+    }
+    // The warning is not decoration: 60fps at 40Mbps really did take the renderer out.
+    const risky = cfg.fps >= 50 && cfg.mbps >= 28;
+    const perMin = Math.round((cfg.mbps / 8) * 60);
+    hint.textContent = risky
+      ? "~" + perMin + " MB/min — this can crash the tab on a long take"
+      : "~" + perMin + " MB/min";
+    hint.style.color = risky ? "#ffb454" : "#fff";
+    hint.style.opacity = risky ? "1" : ".55";
+  }
+  info();
+  panel.append(hint);
 
   function note(msg) {
     toast.textContent = msg;
@@ -311,13 +394,15 @@
 
   const style = document.createElement("style");
   style.textContent = "@keyframes fighqPulse{50%{opacity:.25}}";
-  document.documentElement.append(style, pill, toast);
+  document.documentElement.append(style, pill, panel, toast);
   paint();   // without this the label is empty until the first recording starts
 
   // ponytail: a 1s poll, not a MutationObserver. Figma rebuilds this subtree
   // constantly; observing it costs more than one cheap querySelector a second.
   setInterval(() => {
-    pill.style.display = parts() || state.rec ? "flex" : "none";
+    const open = !!parts();
+    pill.style.display = open || state.rec ? "flex" : "none";
+    panel.style.display = open && !state.rec ? "flex" : "none";
     paint();
   }, 1000);
 })();
