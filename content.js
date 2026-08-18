@@ -58,7 +58,9 @@
      higher — the panel warns when the combination gets there. localStorage rather
      than chrome.storage keeps this a zero-permission, zero-chrome.* content script. */
   const STORE = "figHQRecorder.settings";
-  const DEFAULTS = { fps: 30, mbps: 12, mime: CODECS[0] && CODECS[0].mime };
+  const DEFAULTS = { fps: 30, mbps: 12, mime: CODECS[0] && CODECS[0].mime, taps: true };
+  const TAP_MS = 520;      // ripple lifetime
+  const TAP_R = 0.075;     // max radius, as a fraction of screen width
   const cfg = { ...DEFAULTS };
   try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE) || "{}")); } catch (e) {}
   if (!CODECS.some((c) => c.mime === cfg.mime)) cfg.mime = DEFAULTS.mime;   // codec dropped by a browser update
@@ -210,6 +212,15 @@
       return note("Couldn't load the device frame image");
     }
 
+    /* The cursor is never in the canvas — Figma renders content only — so taps have to
+       be drawn. The preview iframe is same-origin, and coordinates measured inside it
+       are in its own unscaled viewport, so our outer transform doesn't distort them.
+       Capture phase, so the prototype's own handlers can't swallow the event. */
+    const taps = [];
+    const tapDoc = p.iframe.contentDocument;
+    const onTap = (e) => taps.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+    if (cfg.taps) tapDoc.addEventListener("pointerdown", onTap, true);
+
     const out = document.createElement("canvas");
     out.width = bezel.width;
     out.height = bezel.height;
@@ -218,6 +229,25 @@
     const sx = g.x * out.width, sy = g.y * out.height;
     const sw = g.w * out.width,  sh = g.h * out.height;
     const radii = [{ x: g.radius.x * sw, y: g.radius.y * sh }];
+    const inner = p.iframe.contentWindow;
+    const tapX = sw / (inner.innerWidth || sw), tapY = sh / (inner.innerHeight || sh);
+
+    const ripple = TAP_R * sw;
+    const drawTaps = (ctx2, now) => {
+      for (let i = taps.length - 1; i >= 0; i--) {
+        const k = (now - taps[i].t) / TAP_MS;
+        if (k >= 1) { taps.splice(i, 1); continue; }       // expired; list stays short
+        const cx = sx + taps[i].x * tapX, cy = sy + taps[i].y * tapY;
+        const fade = 1 - k;
+        ctx2.beginPath();
+        ctx2.arc(cx, cy, ripple * (0.35 + 0.65 * k), 0, Math.PI * 2);
+        ctx2.fillStyle = "rgba(255,255,255," + (0.16 * fade).toFixed(3) + ")";
+        ctx2.fill();
+        ctx2.lineWidth = Math.max(2, sw * 0.005);
+        ctx2.strokeStyle = "rgba(255,255,255," + (0.85 * fade).toFixed(3) + ")";
+        ctx2.stroke();
+      }
+    };
 
     let raf = 0, last = -1e9;
     const minGap = 1000 / fps;
@@ -231,6 +261,7 @@
       ctx.roundRect(sx, sy, sw, sh, radii);
       ctx.clip();
       ctx.drawImage(video, sx, sy, sw, sh);               // screen, clipped inside the outline...
+      drawTaps(ctx, performance.now());                                   // ripples ride inside the same clip
       ctx.restore();
       ctx.drawImage(bezel, 0, 0, out.width, out.height);  // ...then the frame over the top of it
     };
@@ -246,6 +277,7 @@
     state.startedAt = performance.now();
     state.stop = () => {
       cancelAnimationFrame(raf);
+      try { tapDoc.removeEventListener("pointerdown", onTap, true); } catch (e) {}
       srcStream.getTracks().forEach((t) => t.stop());
       video.remove();
       bezel.close();
@@ -357,6 +389,16 @@
   codecSel.value = cfg.mime;
   codecSel.onchange = () => { cfg.mime = codecSel.value; saveCfg(); };
   mkRow("Codec").append(codecSel);
+
+  const tapsRow = document.createElement("label");
+  tapsRow.style.cssText = "display:flex;align-items:center;gap:10px;cursor:pointer;opacity:.85";
+  const tapsBox = document.createElement("input");
+  tapsBox.type = "checkbox";
+  tapsBox.checked = !!cfg.taps;
+  tapsBox.style.cssText = "accent-color:#ff4d4d;width:15px;height:15px;flex:none;margin:0";
+  tapsBox.onchange = () => { cfg.taps = tapsBox.checked; saveCfg(); };
+  tapsRow.append(tapsBox, document.createTextNode("Show taps"));
+  panel.append(tapsRow);
 
   const hint = document.createElement("div");
   hint.style.cssText = "font-size:11px;line-height:1.4";

@@ -27,6 +27,7 @@ The panel hides while recording, since the encode is already running. Choices pe
 | Frame rate | 15-60 fps | 30 |
 | Quality | 4-40 Mbps | 12 |
 | Codec | whichever of MP4/H.264, WebM/VP9, WebM/AV1, WebM/VP8 the browser supports | MP4/H.264 |
+| Show taps | on/off | on |
 
 MP4/H.264 leads for a reason: it's the most portable, and VP8 can silently capture an empty clip off a WebGL canvas. Codecs the browser can't encode are dropped from the list rather than offered and then failing at record time.
 
@@ -57,6 +58,14 @@ Three things make it work, each verified against a live prototype:
 **`drawImage()` straight off the WebGL canvas returns blank.** Figma allocates it without `preserveDrawingBuffer`, so the buffer is already gone. `captureStream()` → `<video>` → `drawImage()` is the route that actually has pixels in it.
 
 Screen position, size, and corner radius are all measured from the DOM at record time rather than hardcoded, so switching device frames needs no code changes.
+
+### Taps
+
+The mouse cursor is never in the canvas — Figma renders content only — so taps are drawn rather than captured. The preview iframe is same-origin, so a capture-phase `pointerdown` listener on it records each tap, and the draw loop composites an expanding ripple that fades over ~520ms. Ripples are drawn inside the same clip as the screen, so they can't spill onto the bezel.
+
+Coordinates need no correction. The iframe's internal viewport is the unscaled layout size, and the outer `transform: scale()` doesn't affect measurements taken inside it — so a tap at `(clientX, clientY)` maps 1:1 into the composite. Verified with a real click through a 0.2785 transform: expected (603, 918), captured (601.5, 917.0).
+
+Ripples appear in the recording only, not in the live preview.
 
 ### Getting the corners right
 
