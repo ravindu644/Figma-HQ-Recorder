@@ -25,6 +25,19 @@
  *  3. drawImage() straight off the WebGL canvas returns BLANK — Figma allocates it
  *     without preserveDrawingBuffer, so the buffer is gone by the time we'd read it.
  *     captureStream() -> <video> -> drawImage is the route that actually has pixels.
+ *  4. The bezel PNG is 89% transparent, and the Dynamic Island is baked into it as an
+ *     opaque shape INSIDE the screen cutout — the asset is meant to be drawn OVER the
+ *     screen. So the screen goes down first and the frame on top of it, which makes
+ *     the inner edge and the island exact for free.
+ *     That alone is not enough: the cutout and the area outside the device are BOTH
+ *     alpha 0, so an unclipped screen leaks out through the rounded outer corners.
+ *     Measured on this frame — content over the frame / leak outside the device:
+ *       frame first, circular clip    64784 px  <- the visible bulge
+ *       frame first, elliptical clip  59804 px
+ *       screen first, no clip             0 / 4460 px
+ *       screen first, elliptical clip     0 / 0 px
+ *     Hence both: clip the screen, then lay the frame over it.
+ *     The cutout measures x 52..1257, y 44..2665 — exactly the DOM-derived rect.
  */
 (() => {
   if (window.__figHQRecorder) return;
@@ -79,14 +92,15 @@
     };
   }
 
-  /* Figma clips the screen with `border-radius: 6%; overflow: hidden`. Left unclipped
-     the square screen corners paint over the bezel's curve.
+  /* The screen must be clipped before it's drawn, because the bezel's alpha alone
+     can't do the job: the screen cutout and the area OUTSIDE the device are both
+     fully transparent, so an unclipped screen leaks out through the rounded outer
+     corners (measured: 4460px on this frame).
 
-     This radius is ELLIPTICAL, and that matters. A CSS percentage radius resolves
-     horizontally against width and vertically against height, so "6%" on a
-     1206x2622 screen means 72px across and 157px down — the vertical radius is
-     2.25x the horizontal. Clipping with a single circular 72px radius leaves the
-     content bulging past the frame at every corner. Returned as fractions of the
+     The radius is ELLIPTICAL and that matters. A CSS percentage radius resolves
+     horizontally against width and vertically against height, so Figma's "6%" is
+     72px across but 157px down at native size. Clipping with a single circular
+     radius leaves content bulging at every corner. Returned as fractions of the
      screen box so it survives the resize to native. */
   function cornerRadius(p) {
     const box = p.screenBox;
@@ -94,10 +108,7 @@
     const rect = box.getBoundingClientRect();
     const parts = getComputedStyle(box).borderTopLeftRadius.split(/\s+/);
     const frac = (v, base) => (v.endsWith("%") ? parseFloat(v) / 100 : parseFloat(v) / base) || 0;
-    return {
-      x: frac(parts[0], rect.width),
-      y: frac(parts[1] ?? parts[0], rect.height),
-    };
+    return { x: frac(parts[0], rect.width), y: frac(parts[1] ?? parts[0], rect.height) };
   }
 
   /* Grow the modal's layout box to the bezel's native size, then scale it back down
@@ -199,13 +210,14 @@
       raf = requestAnimationFrame(draw);
       if (t - last < minGap) return;   // compositing 3.5MP at display rate is what melted it
       last = t;
-      ctx.drawImage(bezel, 0, 0, out.width, out.height);
+      ctx.clearRect(0, 0, out.width, out.height);
       ctx.save();
       ctx.beginPath();
       ctx.roundRect(sx, sy, sw, sh, radii);
       ctx.clip();
-      ctx.drawImage(video, sx, sy, sw, sh);
+      ctx.drawImage(video, sx, sy, sw, sh);               // screen, clipped inside the outline...
       ctx.restore();
+      ctx.drawImage(bezel, 0, 0, out.width, out.height);  // ...then the frame over the top of it
     };
     draw(0);
 

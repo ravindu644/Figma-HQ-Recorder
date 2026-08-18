@@ -45,7 +45,24 @@ Three things make it work, each verified against a live prototype:
 
 Screen position, size, and corner radius are all measured from the DOM at record time rather than hardcoded, so switching device frames needs no code changes.
 
-The corner clip is elliptical, not circular. Figma uses `border-radius: 6%`, and a CSS percentage radius resolves horizontally against width but vertically against height — on a 1206x2622 screen that's 72px across and 157px down. Clipping with a single circular radius leaves the content bulging past the frame at every corner.
+### Getting the corners right
+
+This took two fixes, not one.
+
+The bezel PNG is 89% transparent, and the Dynamic Island is baked into it as an opaque shape *inside* the screen cutout — the asset is meant to be drawn **over** the screen. So the screen is drawn first and the frame on top of it, which makes the inner edge and the island exact for free.
+
+That alone isn't enough. The screen cutout and the area *outside* the device are both `alpha == 0`, so an unclipped screen leaks out through the rounded outer corners. The screen also has to be clipped first — with an **elliptical** radius, because Figma's `border-radius: 6%` resolves horizontally against width and vertically against height: 72px across but 157px down at native size.
+
+Measured on this device frame — content painted over the frame / content leaking outside the device:
+
+| draw order | clip | artifact |
+|---|---|---|
+| frame first, screen on top | circular 72 | 64,784 px |
+| frame first, screen on top | elliptical 72x157 | 59,804 px |
+| screen first, frame on top | none | 4,460 px |
+| **screen first, frame on top** | **elliptical 72x157** | **0** |
+
+The cutout measures x 52..1257, y 44..2665 — exactly the rect derived from the DOM.
 
 ## Resolution ceiling
 
@@ -58,6 +75,7 @@ Output is the bezel PNG's native size — around 1310×2710, varying by device. 
 - MP4 comes out of `MediaRecorder` fragmented. Chrome reads the duration correctly, but some other players may scrub poorly; a remux pass would fix that.
 - Recording is capped at 30fps / 12 Mbps by default. Those aren't arbitrary — 60fps at 40 Mbps on a 3.5-megapixel canvas crashed the renderer outright on a two-minute take.
 - Requires a device frame to be set in Figma's Prototype tab. Without one there's no bezel to composite.
+- The Dynamic Island is drawn over your content, because it's part of the frame asset. Figma's own preview hides it behind the screen; a real phone doesn't.
 - Dragging the preview window while it's scaled can feel offset — Figma's drag math doesn't know about the transform.
 
 ## Prior art
