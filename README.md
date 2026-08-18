@@ -27,6 +27,7 @@ The panel hides while recording, since the encode is already running. Choices pe
 | Frame rate | 15-60 fps | 30 |
 | Quality | 4-40 Mbps | 12 |
 | Codec | whichever of MP4/H.264, WebM/VP9, WebM/AV1, WebM/VP8 the browser supports | MP4/H.264 |
+| Resolution | 50-100% of native | 100% |
 | Show taps | on/off | on |
 
 MP4/H.264 leads for a reason: it's the most portable, and VP8 can silently capture an empty clip off a WebGL canvas. Codecs the browser can't encode are dropped from the list rather than offered and then failing at record time.
@@ -58,6 +59,16 @@ Three things make it work, each verified against a live prototype:
 **`drawImage()` straight off the WebGL canvas returns blank.** Figma allocates it without `preserveDrawingBuffer`, so the buffer is already gone. `captureStream()` → `<video>` → `drawImage()` is the route that actually has pixels in it.
 
 Screen position, size, and corner radius are all measured from the DOM at record time rather than hardcoded, so switching device frames needs no code changes.
+
+### If recording feels laggy
+
+Compositing happens on the page's main thread, the same thread Figma renders the prototype on, so every millisecond spent compositing is taken from the thing being recorded. Three things reduce that:
+
+- **The static parts are pre-composed once.** The bezel and the corner clip never change, so they're baked into a single overlay bitmap at record start. Per frame that turns `clearRect` + `save` + `roundRect` + `clip` + `restore` + a blended bezel draw into one opaque `drawImage`. `clip()` was the worst of these — it rasterises a fresh mask every frame for a shape that never moves.
+- **Frames are only composited when something changed.** `requestVideoFrameCallback` fires when the source canvas actually produced a frame; ripples keep the loop awake while they animate. Figma repaints on demand, so at 60fps most ticks were re-encoding an identical frame.
+- **The Resolution slider is the biggest lever.** It shrinks the preview's layout box, so Figma itself renders fewer pixels — the cost that no amount of compositing cleverness can remove. 70% still lands around 917x1897, well above what most people need.
+
+If it's still choppy, drop to 30fps before dropping resolution: 60fps asks for twice the composites and twice the encoding while Figma is also rendering.
 
 ### Taps
 

@@ -58,7 +58,7 @@
      higher — the panel warns when the combination gets there. localStorage rather
      than chrome.storage keeps this a zero-permission, zero-chrome.* content script. */
   const STORE = "figHQRecorder.settings";
-  const DEFAULTS = { fps: 30, mbps: 12, mime: CODECS[0] && CODECS[0].mime, taps: true };
+  const DEFAULTS = { fps: 30, mbps: 12, mime: CODECS[0] && CODECS[0].mime, taps: true, scale: 100 };
   const TAP_MS = 520;      // ripple lifetime
   const TAP_R = 0.075;     // max radius, as a fraction of screen width
   const cfg = { ...DEFAULTS };
@@ -125,7 +125,7 @@
 
   /* Grow the modal's layout box to the bezel's native size, then scale it back down
      visually so it still fits on screen. Returns an undo. */
-  function goNative(p) {
+  function goNative(p, factor) {
     const m = p.modal;
     const before = {
       width: m.style.width, height: m.style.height,
@@ -133,8 +133,8 @@
       transform: m.style.transform, transformOrigin: m.style.transformOrigin,
       left: m.style.left, top: m.style.top,
     };
-    const W = p.bezel.naturalWidth;
-    const H = p.bezel.naturalHeight + 80;   // + the modal's own header; trimmed by the fit-up below
+    const W = Math.round(p.bezel.naturalWidth * factor);
+    const H = Math.round(p.bezel.naturalHeight * factor) + 80;   // + the modal's own header
     const scale = Math.min(1, (innerHeight - 96) / H, (innerWidth - 96) / W);
 
     Object.assign(m.style, {
@@ -183,8 +183,9 @@
     const fps = cfg.fps;              // snapshot: the panel is hidden while recording,
     const mime = cfg.mime;            // but never let a live edit tear a running encode
     const bitrate = cfg.mbps * 1e6;
+    const factor = cfg.scale / 100;
 
-    const undoSize = goNative(p);
+    const undoSize = goNative(p, factor);
     await sleep(1200);              // let Figma reallocate and repaint the canvas
 
     p = parts();                    // the canvas node can be replaced by the resize
@@ -222,15 +223,38 @@
     if (cfg.taps) tapDoc.addEventListener("pointerdown", onTap, true);
 
     const out = document.createElement("canvas");
-    out.width = bezel.width;
-    out.height = bezel.height;
-    const ctx = out.getContext("2d");
+    out.width = Math.round(bezel.width * factor);
+    out.height = Math.round(bezel.height * factor);
+    // alpha:false — the overlay paints every pixel outside the screen, so there is
+    // nothing to blend against and the compositor can skip a whole channel.
+    const ctx = out.getContext("2d", { alpha: false });
 
     const sx = g.x * out.width, sy = g.y * out.height;
     const sw = g.w * out.width,  sh = g.h * out.height;
     const radii = [{ x: g.radius.x * sw, y: g.radius.y * sh }];
     const inner = p.iframe.contentWindow;
     const tapX = sw / (inner.innerWidth || sw), tapY = sh / (inner.innerHeight || sh);
+
+    /* Everything that is not the live screen is static, so compose it ONCE: fill black,
+       punch out the screen hole, lay the bezel over the top. Per frame that turns
+       clearRect + save + roundRect + clip + restore + a blended bezel draw into a single
+       opaque drawImage. clip() was the expensive part — it rasterises a fresh mask every
+       frame — and it was being rebuilt 30-60 times a second for a shape that never moves. */
+    const overlay = document.createElement("canvas");
+    overlay.width = out.width;
+    overlay.height = out.height;
+    const octx = overlay.getContext("2d");
+    octx.fillStyle = "#000";
+    octx.fillRect(0, 0, overlay.width, overlay.height);
+    octx.globalCompositeOperation = "destination-out";
+    octx.beginPath();
+    octx.roundRect(sx, sy, sw, sh, radii);
+    octx.fill();
+    octx.globalCompositeOperation = "source-over";
+    octx.drawImage(bezel, 0, 0, overlay.width, overlay.height);
+    // an ImageBitmap is a GPU-resident source; canvas->canvas draws can force a copy
+    let overlayBmp = overlay;
+    try { overlayBmp = await createImageBitmap(overlay); } catch (e) {}
 
     const ripple = TAP_R * sw;
     const drawTaps = (ctx2, now) => {
@@ -249,21 +273,28 @@
       }
     };
 
+    /* Composite only when there is something new to show. Figma repaints on demand, so
+       at 60fps most ticks were re-encoding an identical frame — pure main-thread cost
+       that starved the very rendering we're trying to capture. requestVideoFrameCallback
+       fires when the source canvas actually produced a frame; ripples keep it awake while
+       they animate. Without rVFC support, dirty stays true and it behaves as before. */
+    let dirty = true;
+    if (video.requestVideoFrameCallback) {
+      const onFrame = () => { dirty = true; video.requestVideoFrameCallback(onFrame); };
+      video.requestVideoFrameCallback(onFrame);
+    }
+
     let raf = 0, last = -1e9;
     const minGap = 1000 / fps;
     const draw = (t) => {
       raf = requestAnimationFrame(draw);
-      if (t - last < minGap) return;   // compositing 3.5MP at display rate is what melted it
+      if (t - last < minGap) return;
+      if (!dirty && !taps.length) return;                 // nothing moved; don't burn a composite
       last = t;
-      ctx.clearRect(0, 0, out.width, out.height);
-      ctx.save();
-      ctx.beginPath();
-      ctx.roundRect(sx, sy, sw, sh, radii);
-      ctx.clip();
-      ctx.drawImage(video, sx, sy, sw, sh);               // screen, clipped inside the outline...
-      drawTaps(ctx, performance.now());                                   // ripples ride inside the same clip
-      ctx.restore();
-      ctx.drawImage(bezel, 0, 0, out.width, out.height);  // ...then the frame over the top of it
+      dirty = false;
+      ctx.drawImage(video, sx, sy, sw, sh);               // live screen...
+      drawTaps(ctx, t);                                   // ...ripples over it...
+      ctx.drawImage(overlayBmp, 0, 0);                    // ...and the static frame masks both
     };
     draw(0);
 
@@ -281,6 +312,8 @@
       srcStream.getTracks().forEach((t) => t.stop());
       video.remove();
       bezel.close();
+      overlay.width = overlay.height = 0;   // drop the backing store
+      if (overlayBmp !== overlay && overlayBmp.close) overlayBmp.close();
       undoSize();
     };
 
@@ -376,6 +409,7 @@
 
   mkSlider("Frame rate", "fps", 15, 60, 5, (v) => v + " fps");
   mkSlider("Quality", "mbps", 4, 40, 2, (v) => v + " Mbps");
+  mkSlider("Resolution", "scale", 50, 100, 10, (v) => v + "%");
 
   const codecSel = document.createElement("select");
   codecSel.style.cssText =
@@ -409,11 +443,16 @@
       return;
     }
     // The warning is not decoration: 60fps at 40Mbps really did take the renderer out.
-    const risky = cfg.fps >= 50 && cfg.mbps >= 28;
+    const risky = cfg.fps >= 50 && cfg.mbps >= 28 && cfg.scale >= 90;
     const perMin = Math.round((cfg.mbps / 8) * 60);
+    const p = parts();
+    const size = p && p.bezel && p.bezel.naturalWidth
+      ? Math.round(p.bezel.naturalWidth * cfg.scale / 100) + "\u00d7" +
+        Math.round(p.bezel.naturalHeight * cfg.scale / 100) + " · "
+      : "";
     hint.textContent = risky
-      ? "~" + perMin + " MB/min — this can crash the tab on a long take"
-      : "~" + perMin + " MB/min";
+      ? size + "~" + perMin + " MB/min — this can crash the tab on a long take"
+      : size + "~" + perMin + " MB/min";
     hint.style.color = risky ? "#ffb454" : "#fff";
     hint.style.opacity = risky ? "1" : ".55";
   }
@@ -445,6 +484,7 @@
     const open = !!parts();
     pill.style.display = open || state.rec ? "flex" : "none";
     panel.style.display = open && !state.rec ? "flex" : "none";
+    if (open && !state.rec) info();
     paint();
   }, 1000);
 })();
