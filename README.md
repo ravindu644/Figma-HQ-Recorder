@@ -45,6 +45,8 @@ Three things make it work, each verified against a live prototype:
 
 Screen position, size, and corner radius are all measured from the DOM at record time rather than hardcoded, so switching device frames needs no code changes.
 
+The corner clip is elliptical, not circular. Figma uses `border-radius: 6%`, and a CSS percentage radius resolves horizontally against width but vertically against height — on a 1206x2622 screen that's 72px across and 157px down. Clipping with a single circular radius leaves the content bulging past the frame at every corner.
+
 ## Resolution ceiling
 
 Output is the bezel PNG's native size — around 1310×2710, varying by device. The screen is rendered by Figma at that size, so it's vector-crisp; the bezel is at 1:1 with its source asset. Push beyond it and the bezel is what softens first.
@@ -53,7 +55,9 @@ Output is the bezel PNG's native size — around 1310×2710, varying by device. 
 
 - Chromium only (Chrome, Brave, Edge, Vivaldi). Firefox needs manifest changes.
 - No audio yet.
-- MP4 comes out of `MediaRecorder` fragmented, so some players show a stuck seek bar. It plays and edits fine; a remux pass would fix the scrubbing.
+- MP4 comes out of `MediaRecorder` fragmented. Chrome reads the duration correctly, but some other players may scrub poorly; a remux pass would fix that.
+- Recording is capped at 30fps / 12 Mbps by default. Those aren't arbitrary — 60fps at 40 Mbps on a 3.5-megapixel canvas crashed the renderer outright on a two-minute take.
+- Requires a device frame to be set in Figma's Prototype tab. Without one there's no bezel to composite.
 - Dragging the preview window while it's scaled can feel offset — Figma's drag math doesn't know about the transform.
 
 ## Prior art
